@@ -788,6 +788,80 @@ func (s *Server) Reload() error {
 	return nil
 }
 
+// ReloadOptions applies any supported options from the provided Option
+// type. This returns an error if an option which doesn't
+// support hot-swapping was changed.
+func (s *Server) ReloadOptions(newOpts *Options) error {
+	s.mu.Lock()
+
+	s.reloading = true
+	defer func() {
+		s.mu.Lock()
+		s.reloading = false
+		s.mu.Unlock()
+	}()
+
+	curOpts := s.getOpts()
+
+	// Wipe trusted keys if needed when we have an operator.
+	if len(curOpts.TrustedOperators) > 0 && len(curOpts.TrustedKeys) > 0 {
+		curOpts.TrustedKeys = nil
+	}
+
+	clientOrgPort := curOpts.Port
+	clusterOrgPort := curOpts.Cluster.Port
+	gatewayOrgPort := curOpts.Gateway.Port
+	leafnodesOrgPort := curOpts.LeafNode.Port
+	websocketOrgPort := curOpts.Websocket.Port
+	mqttOrgPort := curOpts.MQTT.Port
+
+	s.mu.Unlock()
+
+	// Apply flags over config file settings.
+	newOpts = MergeOptions(newOpts, FlagSnapshot)
+
+	// Need more processing for boolean flags...
+	if FlagSnapshot != nil {
+		applyBoolFlags(newOpts, FlagSnapshot)
+	}
+
+	setBaselineOptions(newOpts)
+
+	// setBaselineOptions sets Port to 0 if set to -1 (RANDOM port)
+	// If that's the case, set it to the saved value when the accept loop was
+	// created.
+	if newOpts.Port == 0 {
+		newOpts.Port = clientOrgPort
+	}
+	// We don't do that for cluster, so check against -1.
+	if newOpts.Cluster.Port == -1 {
+		newOpts.Cluster.Port = clusterOrgPort
+	}
+	if newOpts.Gateway.Port == -1 {
+		newOpts.Gateway.Port = gatewayOrgPort
+	}
+	if newOpts.LeafNode.Port == -1 {
+		newOpts.LeafNode.Port = leafnodesOrgPort
+	}
+	if newOpts.Websocket.Port == -1 {
+		newOpts.Websocket.Port = websocketOrgPort
+	}
+	if newOpts.MQTT.Port == -1 {
+		newOpts.MQTT.Port = mqttOrgPort
+	}
+
+	if err := s.reloadOptions(curOpts, newOpts); err != nil {
+		return err
+	}
+
+	s.recheckPinnedCerts(curOpts, newOpts)
+
+	s.mu.Lock()
+	s.configTime = time.Now().UTC()
+	s.updateVarzConfigReloadableFields(s.varz)
+	s.mu.Unlock()
+	return nil
+}
 func applyBoolFlags(newOpts, flagOpts *Options) {
 	// Reset fields that may have been set to `true` in
 	// MergeOptions() when some of the flags default to `true`
